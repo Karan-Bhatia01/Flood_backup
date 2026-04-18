@@ -1,0 +1,96 @@
+GeoAware Flood Risk Prediction System - 85 Districts in India
+================================================================
+
+The following 85 districts are covered by the trained ML model:
+
+1. Ahmedabad
+2. Alappuzha
+3. Bahraich
+4. Ballia
+5. Banswara
+6. Bastar
+7. Belagavi
+8. Bhadradri Kothagudem
+9. Bhadrak
+10. Bharuch
+11. Cachar
+12. Chamoli
+13. Cuttack
+14. Darbhanga
+15. Dehradun
+16. Deoghar
+17. Dhemaji
+18. Dhubri
+19. Dimapur
+20. Dumka
+21. Durg
+22. East Godavari
+23. East Khasi Hills
+24. Eluru
+25. Ernakulam
+26. Godda
+27. Gonda
+28. Gopalganj
+29. Gorakhpur
+30. Guntur
+31. Gwalior
+32. Harda
+33. Haridwar
+34. Hooghly
+35. Hoshangabad
+36. Idukki
+37. Imphal West
+38. Kangra
+39. Karnal
+40. Kendrapara
+41. Kodagu
+42. Kolhapur
+43. Kota
+44. Krishna
+45. Kullu
+46. Lakhimpur
+47. Lakhimpur Kheri
+48. Lohit
+49. Majuli
+50. Mandi
+51. Morena
+52. Murshidabad
+53. Muzaffarpur
+54. Nagaon
+55. Nalgonda
+56. Nashik
+57. New Delhi
+58. Nirmal
+59. North 24 Parganas
+60. Panipat
+61. Papum Pare
+62. Pathanamthitta
+63. Pathankot
+64. Patna
+65. Puri
+66. Raipur
+67. Rupnagar
+68. Saharsa
+69. Sangli
+70. Sawai Madhopur
+71. Shivamogga
+72. Sitamarhi
+73. South Garo Hills
+74. Supaul
+75. Surat
+76. Suryapet
+77. Tehri Garhwal
+78. Thrissur
+79. Uttara Kannada
+80. Vadodara
+81. Varanasi
+82. Wayanad
+83. West Godavari
+84. West Tripura
+85. Yamunanagar
+
+================================================================
+Coverage: Pan-India (All major flood-prone districts)
+Training Data: 266,614 historical records (2024–2026)
+Model: StackingClassifier with GradientBoosting + RandomForest + KNN
+Performance: F1-score ~0.9963 (macro)

@@ -1,0 +1,701 @@
+================================================================================
+GEOAWARE — FLOOD RISK PREDICTION SYSTEM FOR INDIA
+Project Report
+================================================================================
+Version   : 3.0
+Date      : April 2026
+Status    : Production-Ready Backend / Frontend Pending
+================================================================================
+
+
+TABLE OF CONTENTS
+-----------------
+1.  Project Overview
+2.  Problem Statement
+3.  System Architecture
+4.  Data Collection & Sources
+5.  Machine Learning Pipeline
+6.  Feature Engineering
+7.  Target Variable Engineering
+8.  Model Training & Selection
+9.  Inference Pipeline (API)
+10. Confidence Calibration System
+11. Physical Validation Layer
+12. AI Insights (Groq LLM)
+13. API Endpoint Reference
+14. Response Structure
+15. Known Issues & Fixes Applied
+16. Limitations
+17. Future Improvements
+
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+GeoAware is a real-time flood risk prediction system for India. Given a
+geographic location (latitude, longitude, district, state, date), the system:
+
+  1. Fetches real hydro-meteorological data from India WRIS and Open-Meteo APIs
+  2. Runs the data through a trained ML model (StackingClassifier)
+  3. Applies physical consistency validation and confidence calibration
+  4. Returns a structured prediction with full transparency and AI-generated
+     actionable insights via Groq LLM
+
+Output risk levels: Low | Moderate | High
+
+The system is designed for flood risk analysts working at state and district
+level disaster management offices. It prioritises transparency — every response
+explains exactly where each data point came from, what the raw ML model said,
+what the validator changed, and why.
+
+
+================================================================================
+2. PROBLEM STATEMENT
+================================================================================
+
+Flood prediction in India faces three core challenges:
+
+A. DATA GAPS
+   River gauge stations, weather stations, and soil sensors have large coverage
+   gaps. Many flood-prone districts have no real-time sensor data at all.
+   The system must make predictions even when data is partially or fully missing,
+   while being honest about the uncertainty this introduces.
+
+B. MODEL BIAS
+   A naive ML model trained on imbalanced data (or with poor target engineering)
+   will always predict the majority class. The original prototype of this system
+   predicted "High" for every input with 99.99% confidence — regardless of input.
+   This was caused by:
+   - Target variable not being saved properly (all rows got "High")
+   - RobustScaler not applied at inference (raw values sent to model trained on scaled data)
+   - One-hot encoding columns all set to zero (unknown location treated as baseline)
+
+C. CALIBRATION
+   Even after fixing the model, a high class probability (0.9999) does not mean
+   the prediction is reliable when 8/8 input fields came from climate normals
+   rather than real sensors. The system must distinguish "model is confident"
+   from "prediction is trustworthy."
+
+
+================================================================================
+3. SYSTEM ARCHITECTURE
+================================================================================
+
+Request Flow:
+─────────────
+
+  Frontend / Client
+        │
+        ▼  POST /predict  {lat, lon, date, state, district}
+  ┌─────────────────────────────────────────────────────────────┐
+  │  FastAPI  (app/main.py)                                     │
+  │                                                             │
+  │  1. DataFetcher.fetch_all()                                 │
+  │     ├── WRIS POST API (8 concurrent calls)                  │
+  │     ├── Open-Meteo archive / forecast API                   │
+  │     └── Climate/hydro normals (fallback)                    │
+  │                                                             │
+  │  2. FloodPredictor.predict()                                │
+  │     ├── Clip outliers (saved training bounds)               │
+  │     ├── Log-transform hydro features                        │
+  │     ├── Engineer interaction + time features                │
+  │     ├── RobustScaler.transform() (from pkl)                 │
+  │     ├── One-hot encode (cat_imputer from pkl)               │
+  │     └── model.predict_proba()                               │
+  │                                                             │
+  │  3. validate()                                              │
+  │     ├── Completeness-based confidence cap                   │
+  │     ├── Dry condition physical check                        │
+  │     ├── ET conflict check                                   │
+  │     └── Confidence floor                                    │
+  │                                                             │
+  │  4. GroqInsights.generate_insights()                        │
+  │     ├── Groq LLM (if API key set)                           │
+  │     └── Rule-based fallback                                 │
+  │                                                             │
+  │  5. Assemble PredictResponse                                │
+  └─────────────────────────────────────────────────────────────┘
+        │
+        ▼  Full JSON response with 6 transparency layers
+
+File Structure:
+───────────────
+
+  GeoAware_flood/
+  ├── app/
+  │   ├── main.py              Routes + pipeline orchestration
+  │   ├── config.py            Pydantic settings from .env
+  │   ├── models/
+  │   │   └── schemas.py       All Pydantic request/response models
+  │   └── services/
+  │       ├── predictor.py     ML inference
+  │       ├── data_fetcher.py  WRIS + Open-Meteo + fallback
+  │       ├── validator.py     Physical validation + calibration
+  │       └── groq_insights.py Groq LLM insights
+  ├── model/
+  │   └── flood_model.pkl      Active model (copy from notebooks/models/)
+  ├── notebooks/
+  │   ├── flood_prediction_final.ipynb   Full training pipeline
+  │   └── models/
+  │       └── flood_model_stacking_ensemble.pkl   CORRECT pkl with transformers
+  └── src/
+      └── components/
+          └── data_collection_new.py   WRIS dataset builder
+
+
+================================================================================
+4. DATA COLLECTION & SOURCES
+================================================================================
+
+4.1 INDIA WRIS (Water Resources Information System)
+────────────────────────────────────────────────────
+URL: https://indiawris.gov.in/Dataset/<DatasetName>
+Method: POST
+Auth: None required (public API)
+
+Features fetched from WRIS:
+  rainfall_mm          → endpoint: RainFall            agency: CWC, {state}
+  temperature_c        → endpoint: Temperature          agency: {state}, CWC
+  humidity_pct         → endpoint: Relative Humidity    agency: CWC, {state}
+  river_discharge_m3_s → endpoint: River Water Discharge agency: CWC
+  water_level_m        → endpoint: River Water Level    agency: CWC
+  soil_moisture        → endpoint: Soil Moisture         agency: NRSC VIC MODEL
+  atmospheric_pressure → endpoint: Atmospheric Pressure  agency: {state} SW, {state}, CWC
+  evapotranspiration   → endpoint: Evapo Transpiration   agency: NRSC VIC MODEL
+
+All 8 WRIS calls fire concurrently (asyncio.gather).
+A ±3-day window is used around the target date to catch the most recent data.
+The mean of all numeric records in that window is returned.
+statusCode 500 in the WRIS response body = "no data" (not a server error).
+
+4.2 OPEN-METEO
+──────────────
+URL: https://archive-api.open-meteo.com/v1/archive (historical)
+     https://api.open-meteo.com/v1/forecast (near-future)
+Auth: None (completely free)
+
+Features fetched: rainfall, temperature, humidity, pressure, ET0, soil_moisture
+Note: river discharge and water level are NOT available from Open-Meteo.
+
+4.3 CLIMATE / HYDRO NORMALS (last resort fallback)
+──────────────────────────────────────────────────
+Hard-coded monthly averages representing typical India-wide conditions.
+Used only when both WRIS and Open-Meteo return no data for a feature.
+
+Weather normals by month (example):
+  April: rainfall=20mm, temp=30C, humidity=40%, pressure=1008hPa, ET=4.2mm, soil=11%
+
+Hydro normals by flood zone (example):
+  Ganga Plain: discharge=210 m³/s, water_level=440m
+
+The response always tells you which source each field came from via data_quality.sources.
+
+4.4 COVERAGE MAP (85 districts across 22 states)
+─────────────────────────────────────────────────
+States: Assam, Bihar, Jharkhand, West Bengal, Uttar Pradesh, Odisha,
+        Andhra Pradesh, Kerala, Telangana, Madhya Pradesh, Gujarat,
+        Maharashtra, Uttarakhand, Himachal Pradesh, Jammu & Kashmir,
+        Punjab, Haryana, Delhi, Rajasthan, Karnataka, Chhattisgarh,
+        Meghalaya, Arunachal Pradesh, Manipur, Nagaland, Tripura
+
+Flood zones: NE India, Ganga Plain, Ganga Delta, West Coast, East Coast,
+             Krishna-Godavari Delta, Central India, Deccan,
+             West India, Himalayas
+
+
+================================================================================
+5. MACHINE LEARNING PIPELINE
+================================================================================
+
+5.1 DATASET
+───────────
+Source: Collected via data_collection_new.py from India WRIS
+Size: 266,614 rows × 18 columns (raw)
+Date range: March 2024 – March 2026
+Locations: 85 districts
+Missing data: 60–95% missing for most sensor columns (real-world sparse coverage)
+
+5.2 DATA CLEANING
+─────────────────
+Step 1 — Outlier capping:
+  Each numeric column is Winsorised to [1st, 99th] percentile.
+  rainfall_mm had values up to 7.4 billion mm (data entry errors).
+  Clip bounds are saved in the pkl for use at inference time.
+
+Step 2 — Missing value imputation:
+  Priority chain:
+  a) Open-Meteo API (weather columns only)
+  b) Location × Month median
+  c) Flood zone × Month median
+  d) Global month median
+  e) Global median (absolute last resort)
+  After imputation: 0 missing values in training data.
+
+5.3 PREPROCESSING PIPELINE
+───────────────────────────
+The following transforms are applied during training AND saved to pkl for
+exact reproduction at inference:
+
+  num_imputer  → SimpleImputer(strategy='median')
+  scaler       → RobustScaler()
+  cat_imputer  → SimpleImputer(strategy='most_frequent')
+  clip_bounds  → {col: (percentile_1, percentile_99)} for 8 columns
+
+The pkl file stores: model, label_encoder, feature_names, num_imputer,
+scaler, num_cols, cat_imputer, cat_cols, clip_bounds.
+
+IMPORTANT: Using the wrong pkl (without transformers) causes the model to
+receive unscaled raw values, making it always predict the same class.
+
+
+================================================================================
+6. FEATURE ENGINEERING
+================================================================================
+
+From 8 raw features → 135 model features:
+
+6.1 LOG TRANSFORMS (applied before scaling)
+────────────────────────────────────────────
+  rainfall_mm          → log1p(rainfall_mm)
+  river_discharge_m3_s → log1p(river_discharge_m3_s)
+  water_level_m        → log1p(water_level_m)
+
+Reason: These features have extreme right skew (values range 0 to 7000+).
+Log-transform compresses the scale and makes the distribution more normal.
+
+6.2 INTERACTION FEATURES
+─────────────────────────
+  rain_x_humidity    = log(rainfall) × humidity / 100
+  discharge_x_wlevel = log(discharge) × log(water_level)
+  moisture_deficit   = evapotranspiration - soil_moisture
+  heat_index         = temperature × humidity / 100
+
+6.3 CYCLICAL TIME FEATURES
+───────────────────────────
+  month_sin = sin(2π × month / 12)
+  month_cos = cos(2π × month / 12)
+  is_monsoon = 1 if month in [6,7,8,9] else 0
+
+Reason: month 12 and month 1 are adjacent — treating month as a linear
+number would create artificial distance between them.
+
+6.4 GEOGRAPHIC FEATURE
+───────────────────────
+  dist_from_center = sqrt((lat - 20.5)² + (lon - 78.9)²)
+
+6.5 ONE-HOT ENCODING
+──────────────────────
+  stateName (22 unique) → 22 binary columns (drop_first=True → 21)
+  districtName (86 unique) → 85 binary columns (drop_first=True → 85)
+  flood_zone (10 unique) → 9 binary columns (drop_first=True → 9)
+
+Total: 18 numeric + 21 + 85 + 9 = 133... adjusted to 135 in final version.
+
+Baseline (all zeros): Andhra Pradesh / Ahmedabad / Central India
+
+
+================================================================================
+7. TARGET VARIABLE ENGINEERING
+================================================================================
+
+No pre-built flood risk label existed in the dataset.
+A composite flood risk score was engineered from 6 signals.
+
+SCORING LOGIC:
+──────────────
+Each signal is scored 0–2 against the dataset's own 33rd/66th percentile
+(computed per flood zone, not globally — prevents Brahmaputra from making
+small Deccan rivers look safe by comparison).
+
+  Signal                    Score 0            Score 1            Score 2
+  ─────────────────────     ──────────────     ──────────────     ──────────────
+  rainfall_mm (log)         ≤ zone 33rd pct    ≤ zone 66th pct    > zone 66th pct
+  water_level_m             ≤ zone 33rd pct    ≤ zone 66th pct    > zone 66th pct
+  river_discharge (log)     ≤ zone 33rd pct    ≤ zone 66th pct    > zone 66th pct
+  soil_moisture             ≤ zone 33rd pct    ≤ zone 66th pct    > zone 66th pct
+  humidity_pct              < 60%  (+0)        60–80% (+0.5)      ≥ 80%   (+1)
+  evapotranspiration        ≥ 1.0  (+0)        —                  < 1.0   (+1)
+  Monsoon month (Jun–Sep)   —                  —                  +0.5 bonus
+
+Score range: 0 to 10.5
+
+FINAL BINNING:
+──────────────
+The total score is binned at its own 33rd/66th percentile:
+  score ≤ 33rd pct  → Low
+  score ≤ 66th pct  → Moderate
+  score > 66th pct  → High
+
+Result: ~33% Low, ~33% Moderate, ~33% High regardless of data distribution.
+This eliminates class imbalance at the source.
+
+
+================================================================================
+8. MODEL TRAINING & SELECTION
+================================================================================
+
+8.1 MODELS EVALUATED
+──────────────────────
+  Model                CV F1    Val F1   Overfit Gap
+  ─────────────────    ──────   ──────   ───────────
+  Gradient Boosting    0.9950   0.9951   -0.0001  ✅
+  Random Forest        0.9647   0.9675   -0.0028  ✅
+  KNN                  0.9497   0.9569   -0.0072  ✅
+  Decision Tree        0.9457   0.9458   -0.0001  ✅
+  Extra Trees          0.8771   0.8757   +0.0014  ✅
+  Logistic Regression  0.8626   0.8636   -0.0010  ✅
+  Naive Bayes          0.6132   0.6149   -0.0018  ✅
+
+Selection criterion: highest Val F1 with overfit gap < 5%.
+Winner: Gradient Boosting (Val F1 = 0.9951)
+
+8.2 STACKING ENSEMBLE
+───────────────────────
+Base learners: Gradient Boosting, Random Forest, KNN
+Meta-learner: Logistic Regression (C=0.5, class_weight='balanced')
+Stacking Val F1: 0.9960 → better than best single model
+
+Final model: StackingClassifier
+Test F1: ~0.9963 (macro)
+ROC-AUC: 1.000 for all 3 classes (explained below)
+
+Note on AUC=1: The target was engineered from the same features the model
+trains on. The model is learning the scoring function back. This is expected
+and valid — the score is a deterministic function of the features.
+
+8.3 CROSS-VALIDATION SETUP
+───────────────────────────
+  Split: 70% train / 15% val / 15% test (stratified)
+  CV: 5-fold StratifiedKFold on training set
+  Anti-overfitting: class_weight='balanced', depth limits, L2 regularisation,
+                    early stopping (n_iter_no_change=15 for GBM)
+
+
+================================================================================
+9. INFERENCE PIPELINE (API)
+================================================================================
+
+When /predict receives a request, it runs these steps in order:
+
+STEP 1 — Data Fetching (async, ~15–45 seconds total)
+  - Fires 8 WRIS calls + 1 Open-Meteo call concurrently
+  - Each WRIS call tries multiple agencies in order
+  - Fills remaining gaps with climate/hydro normals
+  - Records the source of every field
+
+STEP 2 — Feature Vector Construction
+  a) Apply saved clip_bounds to raw values
+  b) Apply log1p to rainfall, discharge, water_level
+  c) Compute 4 interaction features + 3 time features + 1 geographic feature
+  d) Build numeric array in exact num_cols order
+  e) Apply saved num_imputer, then saved scaler
+  f) Build categorical DataFrame, apply saved cat_imputer, get_dummies(drop_first=True)
+  g) pd.concat([numeric_scaled, ohe_encoded])
+  h) reindex(columns=feat_names, fill_value=0.0)
+
+STEP 3 — Model Inference
+  model.predict_proba(X)[0] → probability for each class
+  class with highest probability → risk_level
+  confidence = class_probs[risk_level]  (always equal)
+
+STEP 4 — Physical Validation (see Section 10)
+
+STEP 5 — Groq LLM (see Section 11)
+
+STEP 6 — Assemble PredictResponse
+
+
+================================================================================
+10. CONFIDENCE CALIBRATION SYSTEM
+================================================================================
+
+The raw ML model returns probabilities like 0.9999 for High risk even when
+all 8 input features came from climate normals (no real sensor data at all).
+This is technically valid but misleading — a 99.99% confidence prediction
+based entirely on estimated data is not trustworthy.
+
+CALIBRATION FORMULA:
+─────────────────────
+  max_confidence = min(0.40 + (realtime_count / 8) * 0.55, 0.95)
+
+  realtime_count = number of fields from WRIS or Open-Meteo (not fallback)
+
+Examples:
+  0/8 real fields  (all fallback)   → max 0.40
+  2/8 real fields                   → max 0.535
+  4/8 real fields                   → max 0.675
+  6/8 real fields                   → max 0.815
+  8/8 real fields  (fully measured) → max 0.95
+
+RESCALING:
+──────────
+When raw_confidence > max_confidence:
+  The predicted class probability is scaled down to max_confidence.
+  Other class probabilities are rescaled proportionally so they sum to 1.0.
+  confidence = class_probabilities[risk_level]  (always kept in sync)
+
+CONFIDENCE FLOOR:
+─────────────────
+  confidence is never returned below 0.30.
+  Below this level the model is essentially guessing.
+
+
+================================================================================
+11. PHYSICAL VALIDATION LAYER
+================================================================================
+
+Runs after ML inference. 4 rules are checked in sequence.
+
+RULE 1 — Completeness Cap (always runs)
+  As described in Section 10.
+
+RULE 2 — Dry Condition Override
+  Triggers when ALL of:
+    rainfall_mm < 1.0  (no meaningful rain)
+    soil_moisture < 15%  (dry soil)
+    humidity_pct < 50%  (dry air)
+    evapotranspiration > 4.0 mm/day  (hot, high evaporation)
+
+  If all 4 signals are dry AND risk = High:
+    - If discharge >= 200 m³/s: keep High, reduce confidence to max 0.65
+      (high discharge despite dry local conditions = likely upstream dam release)
+    - If discharge < 200 m³/s: downgrade High → Moderate, confidence ≤ 0.60
+      (no evidence of upstream event)
+
+  Rationale: April in Rajasthan or Punjab with zero rain, dry soil, 40% humidity,
+  and high evaporation physically cannot have imminent flood risk from local sources.
+
+RULE 3 — ET Conflict
+  Triggers when: risk = High AND ET > 4.0 AND rainfall < 5mm
+  Effect: confidence reduced to max 0.70
+  Rationale: High evapotranspiration indicates hot dry conditions inconsistent
+  with active flooding.
+
+RULE 4 — Confidence Floor
+  confidence = max(confidence, 0.30)
+
+TRANSPARENCY:
+─────────────
+Every rule that fires is documented in validation.adjustments[] with:
+  - What triggered it (exact threshold values)
+  - What changed (old risk → new risk, or old conf → new conf)
+  - Why (plain English hydrological reasoning)
+
+
+================================================================================
+12. AI INSIGHTS (GROQ LLM)
+================================================================================
+
+After validation, the validated risk level and confidence are sent to Groq
+along with the raw data and context about data quality and any adjustments made.
+
+PROMPT STRUCTURE (compact to avoid 413 errors):
+────────────────────────────────────────────────
+  Location, date, risk level, confidence
+  Data quality note (how many fields estimated)
+  First validation adjustment if any
+  All 8 feature values in compact format
+  Instruction to return JSON with 3 keys
+
+The system prompt instructs Groq to reflect data confidence in its tone.
+If confidence is 0.40 (all fallback), the explanation should acknowledge
+uncertainty. If confidence is 0.85 (mostly real data), the explanation
+can be more definitive.
+
+FALLBACK:
+─────────
+If GROQ_API_KEY is not set or Groq returns an error, rule-based templates
+are used. fallback: true in the response indicates this.
+
+RESPONSE FIELDS:
+─────────────────
+  explanation:   What is happening hydrologically and why this risk level
+  action_advice: Specific actions for residents, authorities, emergency services
+  severity_note: What could make conditions better or worse
+
+
+================================================================================
+13. API ENDPOINT REFERENCE
+================================================================================
+
+POST /predict
+  Request:  { latitude, longitude, date, stateName, districtName }
+  Response: PredictResponse (see Section 14)
+  Notes:    date can be past (uses archive) or future (uses forecast + normals)
+
+POST /predict/batch
+  Request:  { locations: [ ...up to 20 PredictRequest ] }
+  Response: { results: [ PredictResponse or {error, location} ], count: int }
+  Notes:    All locations run concurrently. One failure doesn't abort others.
+
+GET /health
+  Response: { status, model_loaded, model_name, groq_available }
+
+GET /debug/wris
+  Query:    stateName, districtName, endpoint, agency, startdate, enddate
+  Response: { http_status, request_url, wris_response }
+  Use:      Verify WRIS data availability for a district before querying /predict
+
+
+================================================================================
+14. RESPONSE STRUCTURE
+================================================================================
+
+PredictResponse fields:
+
+  risk_level           str     "Low" | "Moderate" | "High"
+  confidence           float   Always equals class_probabilities[risk_level]
+  risk_score           float   0.0*Low + 0.5*Moderate + 1.0*High (weighted)
+  class_probabilities  dict    {"High": p, "Low": p, "Moderate": p} sums to 1.0
+
+  raw_data             object
+    rainfall_mm          float
+    temperature_c        float
+    humidity_pct         float
+    river_discharge_m3_s float
+    water_level_m        float
+    soil_moisture        float
+    atmospheric_pressure float
+    evapotranspiration   float
+
+  data_quality         object
+    total_fields         int    Always 8
+    realtime_count       int    Fields from WRIS or Open-Meteo
+    fallback_count       int    Fields from climate normals
+    completeness_pct     float  realtime_count / 8 * 100
+    sources              dict   field → "india-wris|open-meteo|climate-normal-fallback"
+    missing_fields       list   Fields that used fallback
+    max_allowed_confidence float  Derived from completeness formula
+
+  raw_ml_output        object  (before validation)
+    risk_level           str
+    confidence           float  Raw model confidence (may be 0.9999)
+    class_probabilities  dict
+    model_name           str    "StackingClassifier"
+    note                 str    Explains this is pre-validation
+
+  validation           object
+    rules_checked        int
+    rules_fired          int
+    risk_adjusted        bool   True if risk level was changed
+    confidence_adjusted  bool   True if confidence was capped
+    adjustments          list   Human-readable explanation per rule that fired
+
+  ai_insights          object
+    explanation          str
+    action_advice        str
+    severity_note        str
+    generated_by         str    "groq" | "rule-based-fallback"
+    model_used           str    "llama3-8b-8192" or null
+    fallback             bool
+
+
+================================================================================
+15. KNOWN ISSUES & FIXES APPLIED
+================================================================================
+
+ISSUE 1: Model always predicted High with 0.9999 confidence
+  Root cause: Wrong pkl was loaded. The models/ pkl did not have num_imputer,
+              scaler, clip_bounds. Without these, raw unscaled values were sent
+              to a model trained on RobustScaler output.
+  Fix: Load from notebooks/models/ pkl which has all transformers.
+       predictor.py now validates required keys on startup and raises a clear error.
+
+ISSUE 2: confidence ≠ class_probabilities[risk_level]
+  Root cause: Confidence was being capped by prediction_validator.py independently
+              of the class probability redistribution.
+  Fix: After every adjustment, class_probs[risk_level] is set explicitly equal
+       to the final confidence, then all probabilities are renormalized to 1.0.
+
+ISSUE 3: Groq 413 Payload Too Large
+  Root cause: Prompt was ~1200 tokens.
+  Fix: Compact prompt format. All feature values on one line. Max 350 tokens output.
+
+ISSUE 4: Groq returning dict instead of string for action_advice
+  Root cause: Groq occasionally returns nested JSON despite prompt instruction.
+  Fix: to_str() helper in groq_insights.py handles dict and non-string values.
+
+ISSUE 5: Pydantic recursion error on Python 3.8
+  Root cause: list[str] syntax requires Python 3.9+. Also from __future__ import
+              annotations causes Field() to be treated as a forward reference.
+  Fix: Use List[str], Dict[str, Any] from typing. Remove __future__ import.
+
+ISSUE 6: Field name "date" clashes with datetime.date type in Pydantic
+  Root cause: Pydantic v2 on Python 3.8 cannot resolve field name vs type annotation
+              when they share the same identifier.
+  Fix: from datetime import date as DateType — field remains "date", type is DateType.
+
+ISSUE 7: PerformanceWarning — DataFrame highly fragmented
+  Root cause: Old predictor.py inserted OHE columns one by one with row_df[feat]=0.
+  Fix: New predictor.py builds full dict first, uses reindex(columns=feat_names)
+       in a single operation.
+
+ISSUE 8: Dry-season location (Punjab in April) predicted as High
+  Root cause: Global percentile thresholds meant 210 m³/s looked "high" compared to
+              rivers like Brahmaputra.
+  Fix A: Zone-aware percentile scoring in engineer_flood_target().
+  Fix B: Physical validator rule 2 catches and corrects this at inference time.
+
+
+================================================================================
+16. LIMITATIONS
+================================================================================
+
+1. WRIS COVERAGE
+   Not all districts have active gauging stations. Rural and northeastern
+   districts often return no data from any agency. In these cases, hydro
+   normals are used and confidence is capped at 0.40.
+
+2. FUTURE DATES
+   Open-Meteo forecast is limited to 16 days ahead. For dates beyond this,
+   all weather fields fall back to climate normals.
+
+3. UNKNOWN DISTRICTS
+   The model was trained on 85 specific districts. Any district not in this
+   list will have all OHE district columns = 0, treating it as the baseline
+   district (Ahmedabad). Predictions for unknown districts are less reliable.
+
+4. RIVER DISCHARGE / WATER LEVEL
+   Not available from Open-Meteo. If WRIS returns no data (common outside
+   monsoon for many districts), these critical flood signals come from
+   flood-zone hydro normals. The data_quality.missing_fields field will
+   always show this.
+
+5. REAL-TIME LATENCY
+   WRIS API calls can take 30–60 seconds total. Each WRIS call tries multiple
+   agencies sequentially. In production, consider caching WRIS responses for
+   1-6 hours per district.
+
+6. MODEL RETRAINING
+   The model was trained on 2024–2026 data. It should be retrained annually
+   as new WRIS data accumulates. The training notebook (flood_prediction_final.ipynb)
+   is fully reproducible.
+
+
+================================================================================
+17. FUTURE IMPROVEMENTS
+================================================================================
+
+SHORT TERM
+  - Redis cache for WRIS responses (TTL 1-6 hours by data type)
+  - /predict/stream endpoint using Server-Sent Events for progress updates
+  - IMD (India Meteorological Department) API integration for rainfall forecasts
+  - CWC (Central Water Commission) flood bulletin integration
+
+MEDIUM TERM
+  - Dam release data integration (upstream event detection)
+  - Historical flood event database for validation
+  - NDVI / land use features from satellite data
+  - Retraining pipeline that auto-triggers monthly
+
+LONG TERM
+  - Time-series model (LSTM) for multi-day flood trajectory prediction
+  - Ensemble of rule-based + ML + physics-based hydrological model
+  - District-level model specialisation (separate models per flood zone)
+  - Mobile alerting integration (SMS/WhatsApp via Twilio or MSG91)
+
+
+================================================================================
+END OF REPORT
+================================================================================
