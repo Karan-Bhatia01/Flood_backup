@@ -7,7 +7,6 @@ No hardcoded scaler values. Exact mirror of notebook build_features().
 
 import logging
 import joblib
-import gdown
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -50,24 +49,6 @@ class FloodPredictor:
         """Check if model is loaded."""
         return self._is_loaded
 
-    def _download_model_if_missing(self, model_path: Path):
-        """Download model from Google Drive if it does not exist."""
-        if model_path.exists():
-            logger.info("Model file found at %s", model_path)
-            return
-        
-        # Create directory if it doesn't exist
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_id = "1w-OdKkqWU1zJSOa4eGN5TTaqe2Vcsqb0"
-        logger.info("Downloading model from Google Drive to %s...", model_path)
-        
-        try:
-            gdown.download(id=file_id, output=str(model_path), quiet=False)
-            logger.info("Model downloaded successfully to %s", model_path)
-        except Exception as e:
-            raise RuntimeError(f"Failed to download model from Google Drive: {e}")
-
     def _ensure_model_loaded(self, path: Optional[str] = None):
         """Lazy load model only when needed (on first prediction)."""
         if self._is_loaded:
@@ -75,16 +56,15 @@ class FloodPredictor:
         
         model_path = Path(path or settings.MODEL_PATH)
         
-        # Download model if missing
-        self._download_model_if_missing(model_path)
-        
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model not found at {model_path}.\n"
-                "Make sure you are using notebooks/models/flood_model_stacking_ensemble.pkl "
-                "(the one that contains num_imputer, scaler, clip_bounds etc.)."
+                "Make sure the model file exists in your repository at:\n"
+                "notebooks/models/flood_model_stacking_ensemble.pkl"
             )
-        # Use joblib.load which can handle compressed models
+        
+        # Load model using joblib (handles compressed models)
+        logger.info("Loading model from %s...", model_path)
         saved = joblib.load(model_path)
 
         required = ["model", "label_encoder", "feature_names",

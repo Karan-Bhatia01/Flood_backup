@@ -1,3 +1,6 @@
 wris_output
 venv
 .env
+
+# Track the model file (committed to repo)
+!notebooks/models/
