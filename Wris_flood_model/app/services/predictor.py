@@ -6,7 +6,9 @@ No hardcoded scaler values. Exact mirror of notebook build_features().
 """
 
 import logging
+import os
 import pickle
+import requests
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -44,8 +46,44 @@ class FloodPredictor:
         self.is_loaded    = False
         self.model_name   = "not loaded"
 
+    def _download_model_if_missing(self, model_path: Path):
+        """Download model from Google Drive if it does not exist."""
+        if model_path.exists():
+            logger.info("Model file found at %s", model_path)
+            return
+        
+        # Create directory if it doesn't exist
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        drive_url = "https://drive.google.com/uc?id=1w-OdKkqWU1zJSOa4eGN5TTaqe2Vcsqb0"
+        logger.info("Downloading model from Google Drive to %s...", model_path)
+        
+        try:
+            response = requests.get(drive_url, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(model_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            logger.debug("Download progress: %.1f%%", percent)
+            
+            logger.info("Model downloaded successfully (%d bytes)", downloaded)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Failed to download model from Google Drive: {e}")
+
     def load_model(self, path: Optional[str] = None):
         model_path = Path(path or settings.MODEL_PATH)
+        
+        # Download model if missing
+        self._download_model_if_missing(model_path)
+        
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model not found at {model_path}.\n"
