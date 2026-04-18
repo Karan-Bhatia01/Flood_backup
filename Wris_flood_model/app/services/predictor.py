@@ -6,9 +6,8 @@ No hardcoded scaler values. Exact mirror of notebook build_features().
 """
 
 import logging
-import os
 import pickle
-import requests
+import gdown
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -55,27 +54,13 @@ class FloodPredictor:
         # Create directory if it doesn't exist
         model_path.parent.mkdir(parents=True, exist_ok=True)
         
-        drive_url = "https://drive.google.com/uc?id=1w-OdKkqWU1zJSOa4eGN5TTaqe2Vcsqb0"
+        file_id = "1w-OdKkqWU1zJSOa4eGN5TTaqe2Vcsqb0"
         logger.info("Downloading model from Google Drive to %s...", model_path)
         
         try:
-            response = requests.get(drive_url, stream=True, timeout=300)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            percent = (downloaded / total_size) * 100
-                            logger.debug("Download progress: %.1f%%", percent)
-            
-            logger.info("Model downloaded successfully (%d bytes)", downloaded)
-        except requests.RequestException as e:
+            gdown.download(id=file_id, output=str(model_path), quiet=False)
+            logger.info("Model downloaded successfully to %s", model_path)
+        except Exception as e:
             raise RuntimeError(f"Failed to download model from Google Drive: {e}")
 
     def load_model(self, path: Optional[str] = None):
