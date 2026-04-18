@@ -63,9 +63,11 @@ class FloodPredictor:
                 "notebooks/models/flood_model_stacking_ensemble.pkl"
             )
         
-        # Load model using joblib (handles compressed models)
         logger.info("Loading model from %s...", model_path)
-        saved = joblib.load(model_path)
+        try:
+            saved = joblib.load(model_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load model from {model_path}: {e}")
 
         required = ["model", "label_encoder", "feature_names",
                     "num_imputer", "scaler", "num_cols",
