@@ -6,7 +6,7 @@ No hardcoded scaler values. Exact mirror of notebook build_features().
 """
 
 import logging
-import pickle
+import joblib
 import gdown
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +42,13 @@ class FloodPredictor:
         self._cat_imp     = None
         self._cat_cols    = None
         self._clip_bounds = None
-        self.is_loaded    = False
+        self._is_loaded   = False
         self.model_name   = "not loaded"
+
+    @property
+    def is_loaded(self) -> bool:
+        """Check if model is loaded."""
+        return self._is_loaded
 
     def _download_model_if_missing(self, model_path: Path):
         """Download model from Google Drive if it does not exist."""
@@ -63,7 +68,11 @@ class FloodPredictor:
         except Exception as e:
             raise RuntimeError(f"Failed to download model from Google Drive: {e}")
 
-    def load_model(self, path: Optional[str] = None):
+    def _ensure_model_loaded(self, path: Optional[str] = None):
+        """Lazy load model only when needed (on first prediction)."""
+        if self._is_loaded:
+            return
+        
         model_path = Path(path or settings.MODEL_PATH)
         
         # Download model if missing
@@ -75,8 +84,8 @@ class FloodPredictor:
                 "Make sure you are using notebooks/models/flood_model_stacking_ensemble.pkl "
                 "(the one that contains num_imputer, scaler, clip_bounds etc.)."
             )
-        with open(model_path, "rb") as f:
-            saved = pickle.load(f)
+        # Use joblib.load which can handle compressed models
+        saved = joblib.load(model_path)
 
         required = ["model", "label_encoder", "feature_names",
                     "num_imputer", "scaler", "num_cols",
@@ -98,7 +107,7 @@ class FloodPredictor:
         self._cat_cols    = saved["cat_cols"]
         self._clip_bounds = saved["clip_bounds"]
         self.model_name   = type(self._model).__name__
-        self.is_loaded    = True
+        self._is_loaded   = True
 
         logger.info(
             "Model loaded: %s | features: %d | classes: %s | "
@@ -118,8 +127,8 @@ class FloodPredictor:
         flood_zone: str,
         features: CollectedFeatures,
     ) -> PredictionResult:
-        if not self.is_loaded:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+        # Lazy load model on first prediction
+        self._ensure_model_loaded()
 
         X        = self._build_feature_vector(lat, lon, date, state, district, flood_zone, features)
         proba    = self._model.predict_proba(X)[0]

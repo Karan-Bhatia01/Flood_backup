@@ -45,8 +45,7 @@ groq_service = GroqInsights()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Flood Risk Prediction API v3...")
-    predictor.load_model()
-    logger.info("Model loaded: %s", predictor.model_name)
+    logger.info("Model will load on first prediction (lazy loading)")
     yield
     logger.info("Shutting down.")
 
