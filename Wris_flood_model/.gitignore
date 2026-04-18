@@ -1,4 +1,3 @@
 wris_output
 venv
 .env
-*.pkl
